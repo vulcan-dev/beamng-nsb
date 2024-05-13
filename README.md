@@ -4,3 +4,5 @@ I plan on making it so you can do other things as well, but I'm not sure what to
 # Installation
 Simply download `winmm.lib` and `signatures.json` from the releases and put them in the game's `Bin64` folder (in the installation path, not where mods and other stuff is located).
 All you have to do then is launch the game with the argument specified above. It works because programs automatically load dll's like `winmm`.
+
+(Also, the `nsb` stands for "no sandbox". That's what it was originally called, but the function that I hook doesn't really handle that, it only handles loadlib)
