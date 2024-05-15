@@ -1,19 +1,15 @@
 #program_export
 DllMain :: (hModule: HMODULE, dwReason: DWORD, lpReserved: LPVOID) -> BOOL #c_call {
-    ctx: Context;
-    push_context ctx {
-        if (dwReason != DLL_PROCESS_ATTACH) {
-            return .TRUE;
-        }
-        
-        console_init();
-        
-        args := collect_arguments();
-        defer free_arguments(*args);
-        
-        if array_find(args, "-c-allow-loadlib") then allow_loadlib();
+    if (dwReason != DLL_PROCESS_ATTACH) {
+        return .TRUE;
     }
-
+    
+    DisableThreadLibraryCalls(hModule);
+    
+    if !entry_func() {
+        return .FALSE;
+    }
+    
     return .TRUE;
 }
 
@@ -21,10 +17,30 @@ DllMain :: (hModule: HMODULE, dwReason: DWORD, lpReserved: LPVOID) -> BOOL #c_ca
 signatures: JSON_Signatures;
 
 #scope_file
+entry_func :: () -> s32 #c_call {
+    ctx: Context;
+    push_context ctx {
+        console_init();
+        
+        args := collect_arguments();
+        defer free_arguments(*args);
+        
+        root := path_decomp(args[0]);
+        
+        if !read_signatures(root) {
+            return 0;
+        }
+        
+        if array_find(args, "-c-allow-loadlib") then allow_loadlib();
+        if array_find(args, "-c-unrestrict-openwebbrowser") then unrestrict_open_web_browser();
+    }
+    
+    return 1;
+}
+
 allow_loadlib :: () -> bool {
     log("[BNG_NSB] Allowing Loadlib");
 
-    if !parse_signatures() then return false;
     if !init_minhook() then return false;
     
     func_addr := find_pattern_v2(signatures.allow_loadlib.data, true);
@@ -48,13 +64,45 @@ allow_loadlib :: () -> bool {
     return true;
 }
 
+unrestrict_open_web_browser :: () -> bool {
+    log("[BNG_NSB] Unrestricting openWebBrowser");
+
+    /*
+    sub_7FF6274652F0+CA   0F8                 call    sub_7FF6274D43D0
+    sub_7FF6274652F0+CF   0F8                 test    al, al
+    sub_7FF6274652F0+D1   0F8                 jnz     short loc_7FF627465437 <-- This :D
+    sub_7FF6274652F0+D3   0F8                 lea     rax, aUnableToOpenWe_0 ; "unable to open webpage due to domain fi"...
+    */
+
+    log("jnz !!!!!!!!!!!! = %", signatures.openWebBrowser_jnz.data);
+    jnz_addr := find_pattern_v2(signatures.openWebBrowser_jnz.data);
+
+    if jnz_addr == 0x0 {
+        MessageBoxA(null, "Failed finding memory pattern", "unrestrict_open_web_browser failed", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    
+    log("jnz_addr = 0x%", formatInt(jnz_addr, 16));
+
+    instruction_bytes := "\xEB\x74\x48\x8D\x05\x26\x01\xCF\x00\x48\x89\x45\xA7\x48\xC7\x45";
+
+    if !memory_write(xx jnz_addr, instruction_bytes) {
+        sys_code, sys_msg := get_error_value_and_string();
+        msg := tprint("Failed patching bytes, error: { code: % | message: % }", sys_msg, sys_code);
+        MessageBoxA(null, msg.data, "unrestrict_open_web_browser failed", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    return true;
+}
+
 minhook_initialized := false;
 init_minhook :: () -> bool {
     if minhook_initialized then return true;
 
     mh_status := MH_Initialize();
     if mh_status != .OK {
-        log_error("[BNG_NSB] MH_Initialize failed: %\n", to_string(mh_status));
+        log("[BNG_NSB] MH_Initialize failed: %\n", to_string(mh_status));
         return false;
     }
     
@@ -63,22 +111,56 @@ init_minhook :: () -> bool {
 }
 
 parsed_signatures := false;
-parse_signatures :: () -> bool {
+read_signatures :: (game_root: string) -> bool {
     if parsed_signatures then return true;
+    parsed_signatures = true;
     
-    json_data, success := read_entire_file("signatures.json");
+    log("Reading signatures");
+    
+    log("%", tprint("%/signatures.json", game_root));
+    json_data, success := read_entire_file(tprint("%/signatures.json", game_root));
     if !success {
-        log_error("[BNG_NSB] Failed reading \"signatures.json\"");
+        MessageBoxA(null, "AAA", "unrestrict_open_web_browser failed", MB_OK | MB_ICONERROR);
+        log("[BNG_NSB] Failed reading \"signatures.json\"");
         return false;
     }
     
     success, signatures = json_parse_string(json_data, JSON_Signatures, ignore_unknown=false);
     if !success {
-        log_error("[BNG_NSB] Failed parsing JSON data");
+        MessageBoxA(null, "AA", "unrestrict_open_web_browser failed", MB_OK | MB_ICONERROR);
+        log("[BNG_NSB] Failed parsing JSON data");
+        return false;
+    }
+
+    // Check for any missing signatures
+    sb: String_Builder;
+    defer free_buffers(*sb);
+    
+    is_missing_signatures := false;
+    
+    tis := cast(*Type_Info_Struct)JSON_Signatures;
+    for tis.members {
+        ptr := (cast(*void)*signatures) + it.offset_in_bytes;
+        value := (cast(*string)ptr).*;
+        log("%", value);
+        if value == "" {
+            if !is_missing_signatures {
+                append(*sb, "Missing signatures:\n");
+                is_missing_signatures = true;
+            }
+        
+            append_value := tprint("  %\n", it.name);
+            append(*sb, append_value);
+            log("Missing signature: %", it.name);
+        }
+    }
+    
+    if is_missing_signatures {
+        sb_string := builder_to_string(*sb);
+        MessageBoxA(null, sb_string.data, "Failed reading signatures", MB_OK | MB_ICONERROR);
         return false;
     }
     
-    parsed_signatures = true;
     return true;
 }
 
@@ -98,7 +180,7 @@ collect_arguments :: () -> []string {
         argv[it] = cast(*u8)alloc(needed);
 
         if WideCharToMultiByte(CP_UTF8, 0, wide_args[it], -1, argv[it], needed, null, null) <= 0 {
-            log_error("[BNG_NSB] Failed collecting arguments, WideCharToMultiByte failed on argument [%]", it);
+            log("[BNG_NSB] Failed collecting arguments, WideCharToMultiByte failed on argument [%]", it);
             continue;
         }
 
@@ -137,4 +219,5 @@ Utf8 :: #import "Windows_Utf8";
 
 JSON_Signatures :: struct {
     allow_loadlib: string;
+    openWebBrowser_jnz: string;
 }

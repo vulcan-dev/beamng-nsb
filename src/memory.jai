@@ -43,9 +43,7 @@ find_pattern_v2 :: (pattern_u8: *u8, relative: bool = false) -> u64 #no_abc {
     pattern := to_string(pattern_u8);
     code_to_ida_style(*pattern);
 
-    mask_len: u16 = cast(u16)pattern.count / 4;
     mask := create_mask_for_ida_pattern(pattern);
-
     escaped := escape_ida_code_pattern(pattern);
 
     // logformatInt("pattern: %, mask: %, escaped: %\n", pattern, cast(string)mask, cast(string)escaped);
@@ -63,36 +61,14 @@ find_pattern :: (sig: Signature) -> u64 #no_abc {
     return 0;
 }
 
-get_signature_and_mask :: (sig: *u8) -> [..]u8, [..]u8 {
-    pattern := to_string(sig);
-    code_to_ida_style(*pattern);
+memory_write :: (addr: *void, value: string) -> bool {
+    old_protection: u32;
 
-    mask_len: u16 = cast(u16)pattern.count / 4;
-    mask := create_mask_for_ida_pattern(pattern);
-
-    escaped := escape_ida_code_pattern(pattern);
-    return escaped, mask;
-}
-
-// Unused right now
-get_function_from_ida :: (sig: $S, mask: $M, fn: *$T, relative: bool = false) #modify {
-    return (cast(*Type_Info_Struct)T).type == .PROCEDURE;
-} {
-    result := find_pattern(.{sig.data, mask.data, relative});
-    assert(result, tprint("Invalid Signature: %", to_string(sig.data)));
-
-    fn.* = cast(T)result;
-}
-
-get_function_from_ida :: (sig: *u8, fn: *$T, relative: bool = false, off: u32 = 0) #modify {
-    ti: Type_Info_Struct = cast(*Type_Info_Struct)T;
-    return ti.type == .PROCEDURE;
-} {
-    result := find_pattern_v2(sig, relative);
-    assert(result != 0, tprint("Invalid Signature: %", to_string(sig)));
+    if !VirtualProtect(addr, xx value.count, PAGE_EXECUTE_READWRITE, *old_protection) then return false;
+    memcpy(cast(LPVOID)addr, value.data, xx value.count);
+    if !VirtualProtect(addr, xx value.count, old_protection, *old_protection) then return false;
     
-    fn.* = cast(T)(result - off);
-    print("Got function: 0x%\n", formatInt(result, 16));
+    return true;
 }
 
 #scope_file
@@ -123,8 +99,7 @@ escape_ida_code_pattern :: (pattern: string) -> [..]u8 #no_abc {
 }
 
 code_to_ida_style :: (pattern: *string) {
-    pattern.* = replace(pattern.*, "??", "?"); // If we use the other IDA plugin, we will get ?? instead of just ?, you know what I mean??
-    pattern.* = replace(pattern.*, "?", "CC");
+    pattern.* = replace(pattern.*, "??", "CC");
     pattern.* = replace(pattern.*, " ", "\\x");
     pattern.* = join("\\x", pattern.*);
 }

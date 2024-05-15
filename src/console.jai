@@ -1,9 +1,5 @@
 #scope_export
 console_init :: () {
-    // if !AttachConsole(-1)
-    //     return;
-    // AllocConsole();
-
     g_console = GetStdHandle(STD_OUTPUT_HANDLE);
     mode: DWORD = 0;
     GetConsoleMode(g_console, cast(LPDWORD)*mode);
