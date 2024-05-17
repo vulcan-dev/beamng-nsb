@@ -43,7 +43,7 @@ allow_loadlib :: () -> bool {
 
     if !init_minhook() then return false;
     
-    func_addr := find_pattern_v2(signatures.allow_loadlib.data, true);
+    func_addr := memory_find_pattern(signatures.allow_loadlib.data, true);
     if func_addr == 0x0 {
         MessageBoxA(null, "Failed finding memory pattern", "allow_loadlib failed", MB_OK | MB_ICONERROR);
         return false;
@@ -70,26 +70,29 @@ unrestrict_open_web_browser :: () -> bool {
     /*
     sub_7FF6274652F0+CA   0F8                 call    sub_7FF6274D43D0
     sub_7FF6274652F0+CF   0F8                 test    al, al
-    sub_7FF6274652F0+D1   0F8                 jnz     short loc_7FF627465437 <-- This :D
+    sub_7FF6274652F0+D1   0F8                 jnz     short loc_7FF627465437 <-- We just want to change this JNZ (jump not zero) to a JMP
     sub_7FF6274652F0+D3   0F8                 lea     rax, aUnableToOpenWe_0 ; "unable to open webpage due to domain fi"...
     */
 
-    log("jnz !!!!!!!!!!!! = %", signatures.openWebBrowser_jnz.data);
-    jnz_addr := find_pattern_v2(signatures.openWebBrowser_jnz.data);
+    jnz_addr := memory_find_pattern(signatures.openWebBrowser_jnz.data);
 
     if jnz_addr == 0x0 {
         MessageBoxA(null, "Failed finding memory pattern", "unrestrict_open_web_browser failed", MB_OK | MB_ICONERROR);
         return false;
     }
     
-    log("jnz_addr = 0x%", formatInt(jnz_addr, 16));
+    if !memory_protect(xx jnz_addr, 2, #code {
+        jnz_inst: *u8 = xx jnz_addr;
+        if jnz_inst.* != 0x75 {
+            message_box(MB_OK | MB_ICONERROR, EXE_NAME, "Invalid instruction, game may have updated and we have the wrong address");
+            return false;
+        }
 
-    instruction_bytes := "\xEB\x74\x48\x8D\x05\x26\x01\xCF\x00\x48\x89\x45\xA7\x48\xC7\x45";
-
-    if !memory_write(xx jnz_addr, instruction_bytes) {
-        sys_code, sys_msg := get_error_value_and_string();
-        msg := tprint("Failed patching bytes, error: { code: % | message: % }", sys_msg, sys_code);
-        MessageBoxA(null, msg.data, "unrestrict_open_web_browser failed", MB_OK | MB_ICONERROR);
+        memory_print_as_string(xx jnz_addr, 16, "openWebBrowser_jnz before: ");
+        jnz_inst.* = 0xEB; // Change the first byte from JNZ (0x75) to JMP (0xEB) instruction
+        memory_print_as_string(xx jnz_addr, 16, "openWebBrowser_jnz after: ");
+    }) {
+        message_box(MB_OK | MB_ICONERROR, EXE_NAME, "Something went wrong!");
         return false;
     }
 
@@ -216,8 +219,11 @@ Utf8 :: #import "Windows_Utf8";
 #load "console.jai";
 #load "memory.jai";
 #load "hook.jai";
+#load "helpers.jai";
 
 JSON_Signatures :: struct {
     allow_loadlib: string;
     openWebBrowser_jnz: string;
 }
+
+EXE_NAME :: "BeamNG.drive.x64.exe";
