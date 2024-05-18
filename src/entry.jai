@@ -7,6 +7,7 @@ DllMain :: (hModule: HMODULE, dwReason: DWORD, lpReserved: LPVOID) -> BOOL #c_ca
     DisableThreadLibraryCalls(hModule);
     
     if !entry_func() {
+        ExitProcess(1);
         return .FALSE;
     }
     
@@ -20,6 +21,7 @@ signatures: JSON_Signatures;
 entry_func :: () -> s32 #c_call {
     ctx: Context;
     push_context ctx {
+        memory_init();
         console_init();
         
         args := collect_arguments();
@@ -33,6 +35,37 @@ entry_func :: () -> s32 #c_call {
         
         if array_find(args, "-c-allow-loadlib") then allow_loadlib();
         if array_find(args, "-c-unrestrict-openwebbrowser") then unrestrict_open_web_browser();
+        
+        if array_find(args, "-c-testing") {
+            base := memory_get_info().base_address;
+            
+            // Because we changed the bytes, the signature will be different. Let's just change it locally
+            new_sig := signatures.openWebBrowser_jnz.data;
+            new_sig[0] = #char "E";
+            new_sig[1] = #char "B";
+
+            jnz_addr := memory_find_pattern(new_sig);
+            if jnz_addr == 0x0 {
+                MessageBoxA(null, "Failed finding memory pattern", "unrestrict_open_web_browser failed", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+
+            success, table := memory_scan(xx jnz_addr, xx (jnz_addr + 1024));
+            defer deinit(*table);
+            
+            if !success {
+                log("Memory scan failed");
+                return 0;
+            }
+            
+            log("Memory:");
+            for byte_arr, addr: table {
+                byte_str := bytes_to_str(byte_arr);
+                defer free(byte_str);
+                
+                log("  [0x%] %", formatInt(cast(s64)addr, 16), byte_str);
+            }
+        }
     }
     
     return 1;
@@ -75,7 +108,6 @@ unrestrict_open_web_browser :: () -> bool {
     */
 
     jnz_addr := memory_find_pattern(signatures.openWebBrowser_jnz.data);
-
     if jnz_addr == 0x0 {
         MessageBoxA(null, "Failed finding memory pattern", "unrestrict_open_web_browser failed", MB_OK | MB_ICONERROR);
         return false;
@@ -88,11 +120,12 @@ unrestrict_open_web_browser :: () -> bool {
             return false;
         }
 
-        memory_print_as_string(xx jnz_addr, 16, "openWebBrowser_jnz before: ");
+        memory_print_bytes(xx jnz_addr, 16, "openWebBrowser_jnz before: ");
         jnz_inst.* = 0xEB; // Change the first byte from JNZ (0x75) to JMP (0xEB) instruction
-        memory_print_as_string(xx jnz_addr, 16, "openWebBrowser_jnz after: ");
+        memory_print_bytes(xx jnz_addr, 16, "openWebBrowser_jnz after: ");
     }) {
-        message_box(MB_OK | MB_ICONERROR, EXE_NAME, "Something went wrong!");
+        value, s := get_error_value_and_string();
+        message_box(MB_OK | MB_ICONERROR, EXE_NAME, "Something went wrong! { Code: %, Message: % }", value, s);
         return false;
     }
 

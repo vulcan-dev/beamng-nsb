@@ -292,6 +292,12 @@ SetDefaultDllDirectories :: (
     DirectoryFlags: DWORD
 ) -> BOOL #foreign kernel32;
 
+FlushInstructionCache :: (
+    hProcess: HANDLE,
+    lpBaseAddress: LPCVOID,
+    dwSize: SIZE_T
+) -> BOOL #foreign kernel32;
+
 SetDllDirectoryA :: (
     lpPathName: LPCSTR
 ) -> BOOL #foreign kernel32;

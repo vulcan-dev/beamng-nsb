@@ -1,195 +1,186 @@
 #scope_export
-Signature :: struct {
-    pattern:    *u8;
-    mask:       *u8;
-    relative: bool;
-}
+memory_init :: () {
+    mem_info.initialized = true;
 
-get_module_info :: () {
-    if base_address != 0 then return;
-
-    mi: MODULEINFO;
-    if !GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(null), *mi, size_of(MODULEINFO)) {
-        MessageBoxA(null, "GetModuleInformation Failed", "JAIMP", MB_OK | MB_ICONERROR);
-        return;
+    { // Get Module Information
+        mi: MODULEINFO;
+        if !GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(null), *mi, size_of(MODULEINFO)) {
+            MessageBoxA(null, "GetModuleInformation Failed", "JAIMP", MB_OK | MB_ICONERROR);
+            return;
+        }
+    
+        mem_info.base_address = cast(u64)mi.lpBaseOfDll;
+        mem_info.module_size = mi.SizeOfImage;   
     }
-
-    base_address = cast(u64)mi.lpBaseOfDll;
-    module_size = mi.SizeOfImage;   
 }
 
-get_game_base :: () -> u64 {
-    return base_address;
-}
-
-pattern_compare :: (data: *u8, pattern: *u8, mask: *u8) -> bool {
-    while mask.* {
-        if mask.* == #char "x" && data.* != pattern.* then return false;
-        data += 1;
-        pattern += 1;
-        mask += 1;
-    }
-    return true;
-}
-
-read_ptr :: (addr: u64, offset: u32) -> s64 #no_abc  {
-    rel_offset := (cast(*s32)(addr + offset)).*;
-    return (cast(s64)(addr) + rel_offset + size_of(s32)) + cast(s64)offset;
+memory_get_info :: () -> Memory_Information {
+    return mem_info;
 }
 
 memory_find_pattern :: (pattern_u8: *u8, relative: bool = false) -> u64 #no_abc {
-    get_module_info();
-    
-    pattern := to_string(pattern_u8);
-    code_to_ida_style(*pattern);
+    assert(mem_info.initialized == true);
 
-    mask := create_mask_for_ida_pattern(pattern).data;
-    escaped_pattern := escape_ida_code_pattern(pattern).data;
+    pattern_str := to_string(pattern_u8);
+    pattern, mask := parse_ida_pattern(pattern_str);
+    defer array_free(pattern);
+    defer array_free(mask);
+
+    is_relative := relative || (pattern_str[0] == #char "E" && pattern_str[1] == #char "8");
+
+    // Start scanning/comparing
+    pattern_compare :: (data: *u8, pattern: *u8, mask: *u8) -> bool {
+        while mask.* {
+            if mask.* == #char "x" && data.* != pattern.* then return false;
+            data += 1;
+            pattern += 1;
+            mask += 1;
+        }
+        return true;
+    }
     
-    is_relative := relative || pattern[0] == #char "E" && pattern[1] == #char "8";
-    
-    for 0..module_size - 1 {
-        if pattern_compare(cast(*u8)(base_address + it), escaped_pattern, mask) {
-            if is_relative then return xx read_ptr(xx(base_address + it), 1);
-            return base_address + it;
+    read_ptr :: (addr: u64, offset: u32) -> s64 #no_abc  {
+        rel_offset := (cast(*s32)(addr + offset)).*;
+        return (cast(s64)(addr) + rel_offset + size_of(s32)) + cast(s64)offset;
+    }
+
+    for 0..mem_info.module_size - 1 {
+        if pattern_compare(cast(*u8)(mem_info.base_address + it), pattern.data, mask.data) {
+            if is_relative {
+                return xx read_ptr(xx(mem_info.base_address + it), 1);
+            }
+            return mem_info.base_address + it;
         }
     }
     
     return 0;
 }
 
-memory_write :: (addr: *void, value: string) -> bool {
-    old_protection: u32;
+parse_ida_pattern :: (pattern_str: string) -> (pattern: [..]u8, mask: [..]u8) #no_abc {
+    pattern: [..]u8;
+    mask: [..]u8;
 
-    if !VirtualProtect(addr, xx value.count, PAGE_EXECUTE_READWRITE, *old_protection) then return false;
-    memcpy(cast(LPVOID)addr, value.data, xx value.count);
-    if !VirtualProtect(addr, xx value.count, old_protection, *old_protection) then return false;
-    
-    return true;
+    array_reserve(*pattern, pattern_str.count / 3); // Rough estimate for reserve
+    array_reserve(*mask, pattern_str.count / 3);
+
+    i := 0;
+    while i < pattern_str.count {
+        if pattern_str.data[i] == #char " " {
+            i += 1;
+            continue;
+        }
+        
+        if pattern_str.data[i] == #char "?" {
+            array_add(*pattern, 0);
+            array_add(*mask, #char "?");
+            if i + 1 < pattern_str.count && pattern_str.data[i + 1] == #char "?" {
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else {
+            hex := slice(pattern_str, i, 2);
+            escaped_char := xx string_to_int(hex, 16);
+            array_add(*pattern, xx escaped_char);
+            array_add(*mask, #char "x");
+            i += 2;
+        }
+    }
+
+    return pattern, mask;
 }
 
-Protect_Callback :: #type ();
+byte_to_hex_char :: (nibble: u8) -> u8 {
+    return ifx nibble < 10 then #char "0" + nibble else #char "A" + nibble - 10;
+}
+
+bytes_to_str :: (bytes: []u8, skip_first_sep := true, separator := " ") -> string {
+    builder: String_Builder;
+    init_string_builder(*builder, buffer_size = bytes.count * 3);  // 2 hex digits + space per byte
+
+    for b: bytes {
+        if it_index != 0 || !skip_first_sep {
+            append(*builder, separator);
+        }
+
+        append(*builder, byte_to_hex_char((b >> 4) & 0xF));  // High nibble
+        append(*builder, byte_to_hex_char(b & 0xF));         // Low nibble
+    }
+
+    return builder_to_string(*builder);
+}
+
+// Memory Functions
+//-----------------------------------------------------------
 memory_protect :: (addr: *void, size: s32, code: Code, protect_type: u32 = PAGE_EXECUTE_READWRITE) -> bool #expand {
     old_protection: u32;
     if !VirtualProtect(addr, xx size, protect_type, *old_protection) then return false;
-    defer !VirtualProtect(addr, xx size, old_protection, *old_protection);
-
     #insert code;
+    if !VirtualProtect(addr, xx size, old_protection, *old_protection) then return false;
+    return true;
 }
 
-memory_read_bytes :: (addr: *void, $N: s32) -> (success: bool, bytes: [N]u8) {
-    result: [N]u8;
-    
-    for 0..N-1 {
-        result[it] = (cast(*u8)addr)[it];
-    }
-    
-    return true, result;
+memory_write :: (addr: *void, value: string) -> bool #expand {
+    return memory_protect(addr, xx value.count, #code {
+        memcpy(addr, xx value.data, xx value.count);
+    });
 }
 
 memory_read_bytes :: (addr: *void, count: s32) -> (success: bool, bytes: []u8) {
     result := NewArray(count, u8);
+    success := memory_protect(addr, xx count, #code {
+        for 0..count-1 {
+            result[it] = (cast(*u8)addr)[it];
+        }
+    }, PAGE_READONLY);
     
-    for 0..count-1 {
-        result[it] = (cast(*u8)addr)[it];
-    }
-    
-    return true, result;
+    return success, result;
 }
 
-memory_print_as_string :: (addr: *void, size: s32, text: string = "") {
+memory_print_bytes :: (addr: *void, size: s32, text: string = "") {
     success, bytes := memory_read_bytes(addr, size);
     defer array_free(bytes);
+    
+    if !success {
+        return;
+    }
 
     if text.count != 0 {
         print(text);
     }
-
-    character_to_string :: (x: u8) -> string {
-        s: string;
-        s.count = 1;
-        s.data = alloc(1,, temporary_allocator);
-        s[0] = x;
-
-        return s;
-    }
-
-    for b: bytes {
-        byte_high := (b >> 4) & 0xF; // Extract the high nibble
-        byte_low := b & 0xF;         // Extract the low nibble
-
-        print("\\x");
-
-        // Convert high nibble to hexadecimal character
-        if byte_high < 10 {
-            print(character_to_string(#char "0" + byte_high));
-        } else {
-            print(character_to_string(#char "A" + byte_high - 10));
-        }
-
-        // Convert low nibble to hexadecimal character
-        if byte_low < 10 {
-            print(character_to_string(#char "0" + byte_low));
-        } else {
-            print(character_to_string(#char "A" + byte_low - 10));
-        }
-    }
-    print("\n");
+    
+    str := bytes_to_str(bytes, skip_first_sep=false, separator="\\x");
+    defer free(str);
+    
+    print("%\n", str);
 }
 
+memory_scan :: (start: *void, end: *void, instruction_size: s32 = 16) -> (bool, Table(*void, []u8)) {
+    address_byte_map: Table(*void, []u8);
+    current_addr := start;
+    
+    while current_addr < end {
+        success, bytes := memory_read_bytes(current_addr, instruction_size);
+        if success {
+            table_add(*address_byte_map, current_addr, bytes);
+        } else {
+            value, s := get_error_value_and_string();
+            log("Failed reading bytes at address(current=0x%, start=0x%, end=0x%): %, %", formatInt(cast(s64)current_addr, 16), formatInt(cast(s64)start, 16), formatInt(cast(s64)end, 16), value, s);
+            return false, address_byte_map;
+        }
+        
+        current_addr += instruction_size;
+    }
+    
+    return true, address_byte_map;
+}
+
+#scope_export
+Memory_Information :: struct {
+    base_address: u64;
+    module_size:  u32;
+    initialized:  bool;
+}
 
 #scope_file
-escape_ida_code_pattern :: (pattern: string) -> [..]u8 #no_abc {
-    escaped: [..]u8;
-    array_reserve(*escaped, pattern.count / 4); // speedy (this is always the amount we end up with)
-
-    for i: 0..pattern.count - 1 {
-        if pattern.data[i] == #char "\\" && pattern.data[i+1] == #char "x" { // If it's \x
-            if i + 3 < pattern.count { // Could be xE8 for example
-                hex: string = slice(pattern, i + 2, 2); // E8
-                escaped_char: u8 = xx string_to_int(hex, 16); // Escape E8
-                array_add(*escaped, escaped_char);
-                i += 3; // Skip to the next part: \xE8\x00\x33
-                        //                             ^ We are now here.
-            } else {
-                // Add \x
-                array_add(*escaped, #char "\\");
-                array_add(*escaped, #char "x");
-            }
-        } else {
-            array_add(*escaped, pattern.data[i]);
-        }
-    }
-
-    // This has been commented more just to help me visualise it better in the future.
-    return escaped;
-}
-
-code_to_ida_style :: (pattern: *string) {
-    pattern.* = replace(pattern.*, "??", "CC");
-    pattern.* = replace(pattern.*, " ", "\\x");
-    pattern.* = join("\\x", pattern.*);
-}
-
-create_mask_for_ida_pattern :: (pattern: string) -> [..]u8 #no_abc {
-    mask_len: u16 = cast(u16)pattern.count / 4;
-
-    mask: [..]u8;
-    array_reserve(*mask, mask_len - 1);
-
-    for 1..mask_len {
-        idx := it * 4 - 1;
-        print("%, ", idx);
-        if pattern.data[idx] == #char "C" && pattern.data[idx - 1] == #char "C" {
-            array_add(*mask, #char "?");
-        } else {
-            array_add(*mask, #char "x");
-        }
-    }
-
-    print("\n");
-    return mask;
-}
-
-base_address: u64 = 0;
-module_size: u32 = 0;
+mem_info: Memory_Information;
